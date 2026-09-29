@@ -1,0 +1,7 @@
+# бинарники
+/selfdiscovery
+/selfdiscovery.exe
+/*.exe
+
+# рабочая директория air (live-reload)
+/tmp/
