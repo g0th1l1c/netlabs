@@ -1,17 +1,11 @@
 package discovery
 
-import (
-	"encoding/hex"
-	"encoding/json"
-)
+import "encoding/json"
 
-//метка протокола чтобы отличать "свои" сообщения от случайного постороннего multicast-трафика, попавшего в ту же группу
+// метка протокола
 const magic = "selfdiscovery-v1"
 
-//длина идентификатора копии в hex-виде
-const idHexLength = 16
-
-// сообщение, которым копии приложения обмениваются между собой
+// message - сообщение, которым копии приложения обмениваются между собой
 type message struct {
 	Magic string `json:"magic"`
 	ID    string `json:"id"`
@@ -31,11 +25,7 @@ func decodeMessage(data []byte) (message, error) {
 	return m, err
 }
 
-//проверяет, что сообщение принадлежит нашему протоколу и заполнено корректно
+// valid проверяет, что сообщение принадлежит нашему протоколу и заполнено корректно
 func (m message) valid() bool {
-	if m.Magic != magic || len(m.ID) != idHexLength {
-		return false
-	}
-	_, err := hex.DecodeString(m.ID)
-	return err == nil
+	return m.Magic == magic && m.ID != ""
 }

@@ -6,71 +6,51 @@ import (
 	"time"
 )
 
-//информация об одной живой копии приложения
-type Peer struct {
-	ID string
-	IP string
-}
-
-//внутренняя запись: последний известный IP и время последнего сообщения
-type entry struct {
-	ip       string
-	lastSeen time.Time
-}
-
-//хранит "живые" копии приложения
+// хранит адреса "живых" копий приложения и момент, когда от каждой из них последний раз приходило сообщение
 type PeerTable struct {
 	mu    sync.Mutex
-	peers map[string]entry
+	peers map[string]time.Time
 }
 
 func NewPeerTable() *PeerTable {
-	return &PeerTable{peers: make(map[string]entry)}
+	return &PeerTable{peers: make(map[string]time.Time)}
 }
 
-//отмечает, что от копии id с адреса ip только что пришло сообщение
-func (t *PeerTable) Touch(id, ip string) (changed bool, oldIP string) {
+//отмечает, что от адреса ip только что пришло сообщение
+func (t *PeerTable) Touch(ip string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	prev, existed := t.peers[id]
-	t.peers[id] = entry{ip: ip, lastSeen: time.Now()}
-	if !existed {
-		return true, ""
-	}
-	return prev.ip != ip, prev.ip
+	_, existed := t.peers[ip]
+	t.peers[ip] = time.Now()
+	return !existed
 }
 
-// удаляет копии, от которых timeout нет сообщений.Возвращает true, если список изменился
+//  удаляет адреса, от которых давно не было сообщений
 func (t *PeerTable) RemoveExpired(timeout time.Duration) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	changed := false
 	deadline := time.Now().Add(-timeout)
-	for id, e := range t.peers {
-		if e.lastSeen.Before(deadline) {
-			delete(t.peers, id)
+	for ip, last := range t.peers {
+		if last.Before(deadline) {
+			delete(t.peers, ip)
 			changed = true
 		}
 	}
 	return changed
 }
 
-//возвращает снимок живых копий, отсортированный по IP 
-func (t *PeerTable) Snapshot() []Peer {
+//возвращает отсортированный снимок текущего списка живых адресов
+func (t *PeerTable) List() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	list := make([]Peer, 0, len(t.peers))
-	for id, e := range t.peers {
-		list = append(list, Peer{ID: id, IP: e.ip})
+	list := make([]string, 0, len(t.peers))
+	for ip := range t.peers {
+		list = append(list, ip)
 	}
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].IP != list[j].IP {
-			return list[i].IP < list[j].IP
-		}
-		return list[i].ID < list[j].ID
-	})
+	sort.Strings(list)
 	return list
 }

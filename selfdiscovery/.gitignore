@@ -1,0 +1,11 @@
+
+/selfdiscovery
+/selfdiscovery.exe
+*.exe
+*.test
+
+
+/bin/
+/dist/
+.vscode/
+.idea/

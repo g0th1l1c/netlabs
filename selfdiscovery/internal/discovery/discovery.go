@@ -10,86 +10,57 @@ import (
 	"time"
 )
 
-const (
-	// readDeadline - как часто прерывать блокирующее чтение чтобы заметить отмену контекста
-	readDeadline = time.Second
-
-	// recvBufferSize - размер буфера для входящих пакетов
-	recvBufferSize = 4096
-
-	localOnlyTTL = 1
-)
-
+// Config - параметры запуска обнаружения копий приложения
 type Config struct {
-	GroupHost string        // IP multicast группы
-	GroupPort int           // порт группы
+	GroupAddr string        // адрес multicast-группы
 	IfaceName string        // имя сетевого интерфейса ("" = подобрать автоматически)
 	Interval  time.Duration // период рассылки сообщений "я жив"
 	Timeout   time.Duration // через сколько отсутствия считать копию пропавшей
 }
 
-//само приложение
+// App - обнаружитель копий приложения
 type App struct {
 	cfg     Config
 	network string
-	iface   *net.Interface //обёртка над интерфейсом
+	iface   *net.Interface
 
-	sendConn *net.UDPConn
+	sender   *multicastSender
 	recvConn *net.UDPConn
 
-	selfID string // уникальный ID этой копии
-	peers  *PeerTable //таблица известных копий
+	selfID string
+	peers  *PeerTable
 }
 
-// разбирает конфигурацию и открывает сетевые соединения для приёма и отправки multicast-сообщений
-//по сути конструктор
+// New разбирает конфигурацию и открывает сетевые соединения для приёма
 func New(cfg Config) (*App, error) {
-	network, groupUDP, err := resolveGroup(cfg.GroupHost, cfg.GroupPort)
+	network, groupUDP, err := resolveGroup(cfg.GroupAddr)
 	if err != nil {
 		return nil, err
 	}
 
-	//обрабатываем и получаем интерфейс
 	iface, err := resolveInterface(cfg.IfaceName, network)
 	if err != nil {
 		return nil, err
 	}
 
-	// соединение для приёма - слушаем группу на выбранном интерфейсе
+	// Соединение для приёма
 	recvConn, err := net.ListenMulticastUDP(network, iface, groupUDP)
 	if err != nil {
 		return nil, fmt.Errorf("не удалось начать приём multicast: %w", err)
 	}
-	_ = recvConn.SetReadBuffer(recvBufferSize)
-
-	// явно включаем multicast loopback 
-	if err := enableLoopback(recvConn, network); err != nil {
-		recvConn.Close()
-		return nil, fmt.Errorf("не удалось включить multicast loopback: %w", err)
-	}
+	_ = recvConn.SetReadBuffer(64 * 1024)
 
 	// Соединение для отправки
-	sendAddr := *groupUDP
-	if network == "udp6" && sendAddr.Zone == "" {
-		sendAddr.Zone = iface.Name
-	}
-	sendConn, err := net.DialUDP(network, nil, &sendAddr)
+	sender, err := newMulticastSender(network, groupUDP, iface)
 	if err != nil {
 		recvConn.Close()
-		return nil, fmt.Errorf("не удалось открыть сокет для отправки: %w", err)
-	}
-
-	//ограничиваем рассылку локальным сегментом - TTL=1 / Hop Limit=1
-	if err := restrictToLocalNetwork(sendConn, network); err != nil {
-		recvConn.Close()
-		sendConn.Close()
-		return nil, fmt.Errorf("не удалось ограничить TTL/hop limit: %w", err)
+		return nil, err
 	}
 
 	selfID, err := randomID()
 	if err != nil {
 		recvConn.Close()
-		sendConn.Close()
+		sender.Close()
 		return nil, err
 	}
 
@@ -97,25 +68,25 @@ func New(cfg Config) (*App, error) {
 		cfg:      cfg,
 		network:  network,
 		iface:    iface,
-		sendConn: sendConn,
+		sender:   sender,
 		recvConn: recvConn,
 		selfID:   selfID,
 		peers:    NewPeerTable(),
 	}, nil
 }
 
-
+// Close закрывает сетевые соединения
 func (a *App) Close() {
-	a.sendConn.Close()
+	a.sender.Close()
 	a.recvConn.Close()
 }
 
-// Run запускает рассылку, приём и отслеживание живости копий
+// Run запускает рассылку, приём и отслеживание "живости" копий
 func (a *App) Run(ctx context.Context) {
-	log.Printf("группа=%s:%d протокол=%s интерфейс=%s свой id=%s",
-		a.cfg.GroupHost, a.cfg.GroupPort, a.network, a.iface.Name, a.selfID)
+	log.Printf("группа=%s протокол=%s интерфейс=%s свой id=%s",
+		a.cfg.GroupAddr, a.network, a.iface.Name, a.selfID)
 
-	// Канал сигнал "список изменился"
+	// Канал-сигнал "список изменился"
 	changed := make(chan struct{}, 1)
 	notifyChanged := func() {
 		select {
@@ -127,8 +98,6 @@ func (a *App) Run(ctx context.Context) {
 	go a.sendLoop(ctx)
 	go a.receiveLoop(ctx, notifyChanged)
 	go a.expireLoop(ctx, notifyChanged)
-
-	a.printPeers() // начальное состояние
 
 	for {
 		select {
@@ -152,7 +121,7 @@ func (a *App) sendLoop(ctx context.Context) {
 	ticker := time.NewTicker(a.cfg.Interval)
 	defer ticker.Stop()
 
-	a.send(payload) //объявляем о себе сразу
+	a.send(payload) // не ждём первого тика, объявляем о себе сразу
 
 	for {
 		select {
@@ -165,14 +134,14 @@ func (a *App) sendLoop(ctx context.Context) {
 }
 
 func (a *App) send(payload []byte) {
-	if _, err := a.sendConn.Write(payload); err != nil {
+	if err := a.sender.Send(payload); err != nil {
 		log.Printf("ошибка отправки multicast-сообщения: %v", err)
 	}
 }
 
-//принимает сообщения от других копий и обновляет таблицу пиров
+// receiveLoop принимает сообщения от других копий и обновляет таблицу пиров
 func (a *App) receiveLoop(ctx context.Context, notifyChanged func()) {
-	buf := make([]byte, recvBufferSize)
+	buf := make([]byte, 4096)
 	for {
 		select {
 		case <-ctx.Done():
@@ -180,8 +149,8 @@ func (a *App) receiveLoop(ctx context.Context, notifyChanged func()) {
 		default:
 		}
 
-		// Дедлайн чтения
-		a.recvConn.SetReadDeadline(time.Now().Add(readDeadline))
+		// Дедлайн чтения нужен чтобы периодически проверять отмену контекста, не блокируясь на чтении навсегда
+		a.recvConn.SetReadDeadline(time.Now().Add(time.Second))
 		n, srcAddr, err := a.recvConn.ReadFromUDP(buf)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -204,20 +173,13 @@ func (a *App) receiveLoop(ctx context.Context, notifyChanged func()) {
 			continue // собственное сообщение, вернувшееся по multicast loopback
 		}
 
-		// Реальный адрес отправителя берём из самого пакета, а не из содержимого сообщения - пакету доверять нельзя
-		
-		ip := srcAddr.IP.String()
-		changed, oldIP := a.peers.Touch(msg.ID, ip)
-		if oldIP != "" && oldIP != ip {
-			log.Printf("копия %s: адрес изменился %s -> %s", msg.ID, oldIP, ip)
-		}
-		if changed {
+		if a.peers.Touch(srcAddr.IP.String()) {
 			notifyChanged()
 		}
 	}
 }
 
-// expireLoop периодически убирает из таблицы копии, от которых давно нет вестей
+//периодически убирает из таблицы копии, от которых давно нет вестей.
 func (a *App) expireLoop(ctx context.Context, notifyChanged func()) {
 	ticker := time.NewTicker(a.cfg.Interval)
 	defer ticker.Stop()
@@ -234,17 +196,13 @@ func (a *App) expireLoop(ctx context.Context, notifyChanged func()) {
 	}
 }
 
-// printPeers печатает список живых копий
 func (a *App) printPeers() {
-	peers := a.peers.Snapshot()
-	if len(peers) == 0 {
+	list := a.peers.List()
+	if len(list) == 0 {
 		fmt.Println("живых копий не обнаружено")
 		return
 	}
-	fmt.Printf("живые копии (%d):\n", len(peers))
-	for _, p := range peers {
-		fmt.Printf("  %s (id %s)\n", p.IP, p.ID)
-	}
+	fmt.Printf("живые копии (%d): %v\n", len(list), list)
 }
 
 func randomID() (string, error) {

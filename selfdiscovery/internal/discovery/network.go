@@ -3,27 +3,19 @@ package discovery
 import (
 	"fmt"
 	"net"
-	"strconv"
-	"strings"
-
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 )
 
-//проверяет адрес multicast-группы и определяет тип сети
-func resolveGroup(host string, port int) (network string, udpAddr *net.UDPAddr, err error) {
-	if port < 1 || port > 65535 {
-		return "", nil, fmt.Errorf("некорректный порт %d: допустимый диапазон 1-65535", port)
+// разбирает адрес multicast-группы 
+func resolveGroup(addr string) (network string, udpAddr *net.UDPAddr, err error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", nil, fmt.Errorf("некорректный адрес группы %q: %w", addr, err)
 	}
 
 	ip := net.ParseIP(host)
 	if ip == nil {
-		if strings.Contains(host, ":") {
-			return "", nil, fmt.Errorf("в -group указывайте только IP-адрес (без порта), порт передаётся отдельно через -port")
-		}
-		return "", nil, fmt.Errorf("не удалось разобрать IP-адрес %q", host)
+		return "", nil, fmt.Errorf("не удалось разобрать IP-адрес из %q", host)
 	}
-
 	if !ip.IsMulticast() {
 		return "", nil, fmt.Errorf("адрес %s не является multicast-адресом", ip)
 	}
@@ -34,29 +26,14 @@ func resolveGroup(host string, port int) (network string, udpAddr *net.UDPAddr, 
 		network = "udp6"
 	}
 
-	udpAddr, err = net.ResolveUDPAddr(network, net.JoinHostPort(host, strconv.Itoa(port)))
+	udpAddr, err = net.ResolveUDPAddr(network, addr)
 	if err != nil {
-		return "", nil, fmt.Errorf("не удалось разрешить адрес группы: %w", err)
+		return "", nil, fmt.Errorf("не удалось разрешить адрес %q: %w", addr, err)
 	}
 	return network, udpAddr, nil
 }
-//включает multicast loopback на принимающем сокете
-func enableLoopback(conn *net.UDPConn, network string) error {
-	if network == "udp4" {
-		return ipv4.NewPacketConn(conn).SetMulticastLoopback(true)
-	}
-	return ipv6.NewPacketConn(conn).SetMulticastLoopback(true)
-}
 
-//  ограничивает multicast-рассылку локальным сегментом
-func restrictToLocalNetwork(conn *net.UDPConn, network string) error {
-	if network == "udp4" {
-		return ipv4.NewPacketConn(conn).SetTTL(localOnlyTTL)
-	}
-	return ipv6.NewPacketConn(conn).SetHopLimit(localOnlyTTL)
-}
-
-// возвращает интерфейс по имени (если он задан явно) либо подбирает подходящий автоматически
+// возвращает интерфейс по имени  либо подбирает подходящий автоматически
 func resolveInterface(name, network string) (*net.Interface, error) {
 	if name != "" {
 		ifi, err := net.InterfaceByName(name)
@@ -74,7 +51,7 @@ func resolveInterface(name, network string) (*net.Interface, error) {
 	return pickInterface(network)
 }
 
-//подбирает первый подходящий сетевой интерфейс: поднятый,поддерживающий multicast, не loopback и имеющий адрес нужного семейства
+// подбирает первый подходящий сетевой интерфейс
 func pickInterface(network string) (*net.Interface, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -92,13 +69,14 @@ func pickInterface(network string) (*net.Interface, error) {
 			continue
 		}
 		if interfaceHasFamily(ifi, network) {
+			ifi := ifi // копия для безопасного взятия адреса
 			return &ifi, nil
 		}
 	}
 	return nil, fmt.Errorf("не найден подходящий сетевой интерфейс для %s (укажите его явно через -iface)", network)
 }
 
-//проверяет, есть ли у интерфейса адрес нужного семейства (IPv4/IPv6)
+// проверяет, есть ли у интерфейса адрес нужного семейства 
 func interfaceHasFamily(ifi net.Interface, network string) bool {
 	addrs, err := ifi.Addrs()
 	if err != nil {
