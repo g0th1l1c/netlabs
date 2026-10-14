@@ -10,22 +10,19 @@ import (
 
 const multicastTTL = 1
 
-// multicastSender - сокет, который реально отправляет пакеты в multicast-группу
 type multicastSender struct {
-	conn    *net.UDPConn // нижележащий сокет, нужен только для Close
+	conn    *net.UDPConn
 	groupV4 *ipv4.PacketConn
 	groupV6 *ipv6.PacketConn
-	dst     net.Addr
 }
 
-// newMulticastSender открывает UDP-сокет на порту и настраивает его как multicast-отправитель
 func newMulticastSender(network string, group *net.UDPAddr, iface *net.Interface) (*multicastSender, error) {
-	conn, err := net.ListenUDP(network, &net.UDPAddr{}) // IP не задан, порт 0 - выберет система
+	conn, err := net.DialUDP(network, nil, group)
 	if err != nil {
 		return nil, fmt.Errorf("не удалось открыть сокет для отправки: %w", err)
 	}
 
-	s := &multicastSender{conn: conn, dst: group}
+	s := &multicastSender{conn: conn}
 
 	switch network {
 	case "udp4":
@@ -68,15 +65,9 @@ func newMulticastSender(network string, group *net.UDPAddr, iface *net.Interface
 	return s, nil
 }
 
-// отправляет payload в multicast-группу через настроенный интерфейс
+// Send отправляет payload в multicast-группу
 func (s *multicastSender) Send(payload []byte) error {
-	var err error
-	switch {
-	case s.groupV4 != nil:
-		_, err = s.groupV4.WriteTo(payload, nil, s.dst)
-	case s.groupV6 != nil:
-		_, err = s.groupV6.WriteTo(payload, nil, s.dst)
-	}
+	_, err := s.conn.Write(payload)
 	return err
 }
 

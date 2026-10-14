@@ -5,16 +5,16 @@ import (
 	"net"
 )
 
-// разбирает адрес multicast-группы 
+// resolveGroup разбирает адрес multicast-группы
 func resolveGroup(addr string) (network string, udpAddr *net.UDPAddr, err error) {
-	host, _, err := net.SplitHostPort(addr)
+	resolved, err := net.ResolveUDPAddr("udp", addr)
 	if err != nil {
 		return "", nil, fmt.Errorf("некорректный адрес группы %q: %w", addr, err)
 	}
 
-	ip := net.ParseIP(host)
+	ip := resolved.IP
 	if ip == nil {
-		return "", nil, fmt.Errorf("не удалось разобрать IP-адрес из %q", host)
+		return "", nil, fmt.Errorf("не удалось разобрать IP-адрес из %q", addr)
 	}
 	if !ip.IsMulticast() {
 		return "", nil, fmt.Errorf("адрес %s не является multicast-адресом", ip)
@@ -26,14 +26,13 @@ func resolveGroup(addr string) (network string, udpAddr *net.UDPAddr, err error)
 		network = "udp6"
 	}
 
-	udpAddr, err = net.ResolveUDPAddr(network, addr)
-	if err != nil {
-		return "", nil, fmt.Errorf("не удалось разрешить адрес %q: %w", addr, err)
-	}
+	// Возвращаем только IP + Port
+	udpAddr = &net.UDPAddr{IP: ip, Port: resolved.Port}
+
 	return network, udpAddr, nil
 }
 
-// возвращает интерфейс по имени  либо подбирает подходящий автоматически
+// resolveInterface возвращает интерфейс по имени либо подбирает подходящий автоматически
 func resolveInterface(name, network string) (*net.Interface, error) {
 	if name != "" {
 		ifi, err := net.InterfaceByName(name)
@@ -51,7 +50,7 @@ func resolveInterface(name, network string) (*net.Interface, error) {
 	return pickInterface(network)
 }
 
-// подбирает первый подходящий сетевой интерфейс
+// pickInterface подбирает первый подходящий сетевой интерфейс
 func pickInterface(network string) (*net.Interface, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -76,7 +75,7 @@ func pickInterface(network string) (*net.Interface, error) {
 	return nil, fmt.Errorf("не найден подходящий сетевой интерфейс для %s (укажите его явно через -iface)", network)
 }
 
-// проверяет, есть ли у интерфейса адрес нужного семейства 
+// interfaceHasFamily проверяет, есть ли у интерфейса адрес нужного семейства.
 func interfaceHasFamily(ifi net.Interface, network string) bool {
 	addrs, err := ifi.Addrs()
 	if err != nil {

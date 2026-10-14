@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"syscall"
 	"time"
+
+	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 )
 
 // Config - параметры запуска обнаружения копий приложения
@@ -18,14 +22,17 @@ type Config struct {
 	Timeout   time.Duration // через сколько отсутствия считать копию пропавшей
 }
 
-// App - обнаружитель копий приложения
 type App struct {
 	cfg     Config
 	network string
 	iface   *net.Interface
 
-	sender   *multicastSender
+	sender *multicastSender //сокет отправки и обертки над ним 
+
+	// сокет приема и обертки над ним
 	recvConn *net.UDPConn
+	recvPC4  *ipv4.PacketConn
+	recvPC6  *ipv6.PacketConn
 
 	selfID string
 	peers  *PeerTable
@@ -43,42 +50,125 @@ func New(cfg Config) (*App, error) {
 		return nil, err
 	}
 
-	// Соединение для приёма
-	recvConn, err := net.ListenMulticastUDP(network, iface, groupUDP)
+	// Принимающий сокет создаём вручную 
+	recvConn, err := listenUDPReuse(network, groupUDP.Port)
 	if err != nil {
-		return nil, fmt.Errorf("не удалось начать приём multicast: %w", err)
+		return nil, fmt.Errorf("не удалось создать принимающий UDP-сокет: %w", err)
 	}
 	_ = recvConn.SetReadBuffer(64 * 1024)
 
-	// Соединение для отправки
+	app := &App{
+		cfg:      cfg,
+		network:  network,
+		iface:    iface,
+		recvConn: recvConn,
+		selfID:   "",
+		peers:    NewPeerTable(),
+	}
+
+	switch network {
+	case "udp4":
+		//обертка над сокетом которая умеет работать с multicast
+		pc := ipv4.NewPacketConn(recvConn)
+		if err := pc.JoinGroup(iface, groupUDP); err != nil {
+			recvConn.Close()
+			return nil, fmt.Errorf("не удалось присоединиться к группе %s на %s: %w",
+				groupUDP, iface.Name, err)
+		}
+		if err := pc.SetMulticastLoopback(true); err != nil {
+			recvConn.Close()
+			return nil, fmt.Errorf("не удалось включить multicast loopback: %w", err)
+		}
+		if err := pc.SetMulticastInterface(iface); err != nil {
+			recvConn.Close()
+			return nil, fmt.Errorf("не удалось установить принимающий интерфейс: %w", err)
+		}
+		app.recvPC4 = pc
+
+	case "udp6":
+		pc := ipv6.NewPacketConn(recvConn)
+		if err := pc.JoinGroup(iface, groupUDP); err != nil {
+			recvConn.Close()
+			return nil, fmt.Errorf("не удалось присоединиться к группе %s на %s: %w",
+				groupUDP, iface.Name, err)
+		}
+		if err := pc.SetMulticastLoopback(true); err != nil {
+			recvConn.Close()
+			return nil, fmt.Errorf("не удалось включить multicast loopback: %w", err)
+		}
+		if err := pc.SetMulticastInterface(iface); err != nil {
+			recvConn.Close()
+			return nil, fmt.Errorf("не удалось установить принимающий интерфейс: %w", err)
+		}
+		app.recvPC6 = pc
+
+	default:
+		recvConn.Close()
+		return nil, fmt.Errorf("неизвестный тип сети %q", network)
+	}
+
+	// Отправитель
 	sender, err := newMulticastSender(network, groupUDP, iface)
 	if err != nil {
 		recvConn.Close()
 		return nil, err
 	}
+	app.sender = sender
 
+	//уникальный айдишник
 	selfID, err := randomID()
 	if err != nil {
 		recvConn.Close()
 		sender.Close()
 		return nil, err
 	}
+	app.selfID = selfID
 
-	return &App{
-		cfg:      cfg,
-		network:  network,
-		iface:    iface,
-		sender:   sender,
-		recvConn: recvConn,
-		selfID:   selfID,
-		peers:    NewPeerTable(),
-	}, nil
+	return app, nil
+}
+
+// listenUDPReuse создаёт UDP-сокет с SO_REUSEADDR
+func listenUDPReuse(network string, port int) (*net.UDPConn, error) {
+	lc := net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			var serr error
+			err := c.Control(func(fd uintptr) {
+				serr = syscall.SetsockoptInt(
+					syscall.Handle(fd),
+					syscall.SOL_SOCKET,
+					syscall.SO_REUSEADDR,
+					1,
+				)
+			})
+			if err != nil {
+				return err
+			}
+			return serr
+		},
+	}
+
+	var addr string
+	if network == "udp4" {
+		addr = fmt.Sprintf("0.0.0.0:%d", port)
+	} else {
+		addr = fmt.Sprintf("[::]:%d", port)
+	}
+
+	pc, err := lc.ListenPacket(context.Background(), network, addr)
+	if err != nil {
+		return nil, err
+	}
+	return pc.(*net.UDPConn), nil
 }
 
 // Close закрывает сетевые соединения
 func (a *App) Close() {
-	a.sender.Close()
-	a.recvConn.Close()
+	if a.sender != nil {
+		a.sender.Close()
+	}
+	if a.recvConn != nil {
+		a.recvConn.Close()
+	}
 }
 
 // Run запускает рассылку, приём и отслеживание "живости" копий
@@ -98,6 +188,8 @@ func (a *App) Run(ctx context.Context) {
 	go a.sendLoop(ctx)
 	go a.receiveLoop(ctx, notifyChanged)
 	go a.expireLoop(ctx, notifyChanged)
+
+	a.printPeers()
 
 	for {
 		select {
@@ -149,9 +241,21 @@ func (a *App) receiveLoop(ctx context.Context, notifyChanged func()) {
 		default:
 		}
 
-		// Дедлайн чтения нужен чтобы периодически проверять отмену контекста, не блокируясь на чтении навсегда
+		// Дедлайн чтения нужен чтобы периодически проверять отмену контекста,
+		// не блокируясь на чтении навсегда
 		a.recvConn.SetReadDeadline(time.Now().Add(time.Second))
-		n, srcAddr, err := a.recvConn.ReadFromUDP(buf)
+
+		var n int
+		var err error
+		switch a.network {
+		case "udp4":
+			n, _, _, err = a.recvPC4.ReadFrom(buf)
+		case "udp6":
+			n, _, _, err = a.recvPC6.ReadFrom(buf)
+		default:
+			return
+		}
+
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
 				continue
@@ -167,19 +271,19 @@ func (a *App) receiveLoop(ctx context.Context, notifyChanged func()) {
 
 		msg, err := decodeMessage(buf[:n])
 		if err != nil || !msg.valid() {
-			continue // чужой/битый пакет в той же группе - игнорируем
+			continue 
 		}
 		if msg.ID == a.selfID {
-			continue // собственное сообщение, вернувшееся по multicast loopback
+			continue // собственное сообщение
 		}
 
-		if a.peers.Touch(srcAddr.IP.String()) {
+		if a.peers.Touch(msg.ID) {
 			notifyChanged()
 		}
 	}
 }
 
-//периодически убирает из таблицы копии, от которых давно нет вестей.
+// expireLoop периодически убирает из таблицы копии, от которых давно нет вестей
 func (a *App) expireLoop(ctx context.Context, notifyChanged func()) {
 	ticker := time.NewTicker(a.cfg.Interval)
 	defer ticker.Stop()
