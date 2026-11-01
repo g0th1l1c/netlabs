@@ -9,7 +9,7 @@ import (
 	"places/internal/model"
 )
 
-// OpenWeather — клиент текущей погоды (метод [2] из задания).
+// OpenWeather — клиент погоды
 // https://openweathermap.org/current
 type OpenWeather struct {
 	HTTP    *httpclient.Client
@@ -17,7 +17,7 @@ type OpenWeather struct {
 	BaseURL string // по умолчанию https://api.openweathermap.org/data/2.5
 }
 
-// NewOpenWeather создаёт клиент с адресом по умолчанию.
+// NewOpenWeather создаёт клиент
 func NewOpenWeather(h *httpclient.Client, key string) *OpenWeather {
 	return &OpenWeather{HTTP: h, Key: key, BaseURL: "https://api.openweathermap.org/data/2.5"}
 }
@@ -37,7 +37,7 @@ type weatherResponse struct {
 	} `json:"wind"`
 }
 
-// Current возвращает текущую погоду в точке.
+// Current получает погоду по координатам
 func (o *OpenWeather) Current(ctx context.Context, lat, lon float64) (model.Weather, error) {
 	q := url.Values{}
 	q.Set("lat", strconv.FormatFloat(lat, 'f', 6, 64))

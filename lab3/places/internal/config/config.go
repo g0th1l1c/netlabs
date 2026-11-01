@@ -1,5 +1,4 @@
-// Package config читает настройки приложения из переменных окружения
-// (и, при наличии, из файла .env).
+// Package config загружает настройки приложения
 package config
 
 import (
@@ -11,7 +10,7 @@ import (
 	"time"
 )
 
-// Config — все настройки приложения.
+// Config хранит настройки приложения
 type Config struct {
 	GraphHopperKey string
 	OpenWeatherKey string
@@ -23,7 +22,7 @@ type Config struct {
 	HTTPTimeout     time.Duration // таймаут одного запроса
 }
 
-// Load загружает .env (если файл есть) и собирает конфигурацию.
+// Load читает настройки из окружения и файла .env
 func Load() (Config, error) {
 	loadDotEnv(".env")
 
@@ -56,8 +55,7 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// intEnv читает целое число из переменной окружения.
-// Если переменная пуста или содержит не число — возвращает значение по умолчанию.
+// intEnv читает целое число или возвращает значение по умолчанию
 func intEnv(name string, def int) int {
 	v, err := strconv.Atoi(strings.TrimSpace(os.Getenv(name)))
 	if err != nil {
@@ -66,9 +64,7 @@ func intEnv(name string, def int) int {
 	return v
 }
 
-// loadDotEnv читает строки вида KEY=VALUE и выставляет переменные окружения,
-// но только те, которые ещё не заданы (настоящее окружение важнее файла).
-// Если файла нет — молча ничего не делает.
+// loadDotEnv загружает переменные из файла, не заменяя заданные в системе
 func loadDotEnv(path string) {
 	f, err := os.Open(path)
 	if err != nil {

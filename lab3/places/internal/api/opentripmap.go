@@ -11,15 +11,14 @@ import (
 	"places/internal/model"
 )
 
-// OpenTripMap — клиент интересных мест (методы [3] и [4] из задания).
-// https://opentripmap.io/docs
+// OpenTripMap — клиент интересных мест
 type OpenTripMap struct {
 	HTTP    *httpclient.Client
 	Key     string
 	BaseURL string // по умолчанию https://api.opentripmap.com/0.1/ru
 }
 
-// NewOpenTripMap создаёт клиент с адресом по умолчанию.
+// NewOpenTripMap создаёт клиент
 func NewOpenTripMap(h *httpclient.Client, key string) *OpenTripMap {
 	return &OpenTripMap{HTTP: h, Key: key, BaseURL: "https://api.opentripmap.com/0.1/ru"}
 }
@@ -32,14 +31,13 @@ type radiusItem struct {
 	Rate  float64 `json:"rate"`
 }
 
-// Nearby возвращает до limit именованных мест в радиусе radiusM метров,
-// отсортированных по расстоянию.
+// Nearby ищет места в заданном радиусе
 func (o *OpenTripMap) Nearby(ctx context.Context, lat, lon float64, radiusM, limit int) ([]model.PlaceBrief, error) {
 	q := url.Values{}
 	q.Set("radius", strconv.Itoa(radiusM))
 	q.Set("lat", strconv.FormatFloat(lat, 'f', 6, 64))
 	q.Set("lon", strconv.FormatFloat(lon, 'f', 6, 64))
-	// Просим с запасом: сервер отдаёт и объекты без названия, их мы отбросим.
+	// запрашиваем с запасом, чтобы отсеять места без названий
 	q.Set("limit", strconv.Itoa(limit*3))
 	q.Set("format", "json")
 	q.Set("apikey", o.Key)
@@ -88,7 +86,7 @@ type detailsResponse struct {
 	} `json:"info"`
 }
 
-// Details возвращает описание места по его xid.
+// Details получает описание места
 func (o *OpenTripMap) Details(ctx context.Context, xid string) (model.PlaceDetails, error) {
 	q := url.Values{}
 	q.Set("apikey", o.Key)
@@ -98,7 +96,7 @@ func (o *OpenTripMap) Details(ctx context.Context, xid string) (model.PlaceDetai
 		return model.PlaceDetails{}, err
 	}
 
-	// Описание берём из Википедии, а если его нет — из собственного поля сервиса.
+	// используем описание Википедии или OpenTripMap
 	descr := strings.TrimSpace(resp.WikipediaExtracts.Text)
 	if descr == "" {
 		descr = strings.TrimSpace(resp.Info.Descr)
