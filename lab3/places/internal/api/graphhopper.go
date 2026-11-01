@@ -1,6 +1,4 @@
-// Package api содержит клиенты внешних сервисов.
-// Каждый клиент умеет одно: собрать URL, сделать запрос и превратить
-// ответ сервера в структуры из пакета model.
+// Package api содержит клиенты внешних сервисов
 package api
 
 import (
@@ -12,7 +10,7 @@ import (
 	"places/internal/model"
 )
 
-// GraphHopper — клиент геокодинга (метод [1] из задания).
+// GraphHopper — клиент геокодинга
 // https://docs.graphhopper.com/#operation/getGeocode
 type GraphHopper struct {
 	HTTP    *httpclient.Client
@@ -21,12 +19,12 @@ type GraphHopper struct {
 	Limit   int    // сколько вариантов локаций просить у сервера
 }
 
-// NewGraphHopper создаёт клиент с адресом по умолчанию.
+// NewGraphHopper создаёт клиент
 func NewGraphHopper(h *httpclient.Client, key string) *GraphHopper {
 	return &GraphHopper{HTTP: h, Key: key, BaseURL: "https://graphhopper.com/api/1", Limit: 7}
 }
 
-// Часть ответа, которая нам нужна. Остальные поля JSON игнорируются.
+// нужные поля ответа GraphHopper
 type geocodeResponse struct {
 	Hits []struct {
 		Name        string `json:"name"`
@@ -43,7 +41,7 @@ type geocodeResponse struct {
 	} `json:"hits"`
 }
 
-// Search ищет локации по названию.
+// Search ищет локации по названию
 func (g *GraphHopper) Search(ctx context.Context, query string) ([]model.Location, error) {
 	q := url.Values{}
 	q.Set("q", query)

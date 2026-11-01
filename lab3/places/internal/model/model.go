@@ -1,10 +1,9 @@
-// Package model содержит простые структуры данных приложения.
-// Здесь нет логики и нет зависимостей от других пакетов проекта.
+// Package model хранит структуры данных приложения
 package model
 
 import "strings"
 
-// Location — найденная локация (результат геокодинга).
+// Location — найденная локация
 type Location struct {
 	Name    string
 	Street  string
@@ -16,8 +15,7 @@ type Location struct {
 	Lon     float64
 }
 
-// Title возвращает человекочитаемое описание локации одной строкой,
-// например: "Цветной проезд, Москва, Россия".
+// Title собирает название локации в одну строку
 func (l Location) Title() string {
 	parts := []string{l.Name, l.Street, l.City, l.State, l.Country}
 	var out []string
@@ -40,7 +38,7 @@ func contains(list []string, s string) bool {
 	return false
 }
 
-// Weather — текущая погода в точке.
+// Weather — текущая погода
 type Weather struct {
 	Description string  // "пасмурно"
 	TempC       float64 // температура, °C
@@ -50,7 +48,7 @@ type Weather struct {
 	WindMS      float64 // скорость ветра, м/с
 }
 
-// PlaceBrief — краткие сведения об интересном месте (из списка по радиусу).
+// PlaceBrief — краткие данные о месте
 type PlaceBrief struct {
 	Xid      string
 	Name     string
@@ -59,7 +57,7 @@ type PlaceBrief struct {
 	Distance float64 // расстояние до точки поиска, метры
 }
 
-// PlaceDetails — подробности о месте (запрос по xid).
+// PlaceDetails — подробности о месте
 type PlaceDetails struct {
 	Description string
 	Address     string
@@ -67,18 +65,14 @@ type PlaceDetails struct {
 	Image       string
 }
 
-// Place — интересное место вместе с описанием.
-// Если описание получить не удалось, в DetailsErr лежит причина,
-// а остальные поля всё равно заполнены.
+// Place — место вместе с подробностями
 type Place struct {
 	PlaceBrief
 	PlaceDetails
 	DetailsErr error
 }
 
-// Report — итоговый общий объект: всё, что нашли про выбранную локацию.
-// Ошибки хранятся отдельно по каждой части, чтобы сбой одного API
-// не лишал пользователя результатов остальных.
+// Report — данные по выбранной локации
 type Report struct {
 	Location   Location
 	Weather    *Weather // nil, если погоду получить не удалось

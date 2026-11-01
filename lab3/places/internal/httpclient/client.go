@@ -1,5 +1,4 @@
-// Package httpclient — тонкая обёртка над net/http для получения JSON.
-// Все API-клиенты проекта ходят в сеть только через неё.
+// Package httpclient выполняет HTTP-запросы и читает JSON
 package httpclient
 
 import (
@@ -14,19 +13,17 @@ import (
 	"time"
 )
 
-// Client выполняет GET-запросы и разбирает JSON-ответы.
-// Безопасен для одновременного использования из нескольких горутин.
+// Client выполняет GET-запросы
 type Client struct {
 	http *http.Client
 }
 
-// New создаёт клиент с таймаутом на каждый запрос.
+// New создаёт клиент с таймаутом
 func New(timeout time.Duration) *Client {
 	return &Client{http: &http.Client{Timeout: timeout}}
 }
 
-// GetJSON делает GET на rawURL и раскладывает JSON-ответ в target.
-// Запрос отменяется, если отменён ctx.
+// GetJSON выполняет запрос и разбирает JSON-ответ
 func (c *Client) GetJSON(ctx context.Context, rawURL string, target any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
@@ -51,8 +48,7 @@ func (c *Client) GetJSON(ctx context.Context, rawURL string, target any) error {
 	return nil
 }
 
-// cleanError убирает URL из текста ошибки: в нём лежит API-ключ,
-// а ошибки мы выводим пользователю и можем записать в лог.
+// cleanError удаляет URL с ключом из ошибки
 func cleanError(err error) error {
 	var ue *url.Error
 	if errors.As(err, &ue) {

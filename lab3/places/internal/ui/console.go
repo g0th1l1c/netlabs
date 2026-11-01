@@ -1,5 +1,4 @@
-// Package ui — консольный интерфейс. Только ввод и вывод, никакой логики:
-// всё, что связано с данными, делает пакет service.
+// Package ui отвечает за консольный ввод и вывод
 package ui
 
 import (
@@ -14,20 +13,19 @@ import (
 	"places/internal/service"
 )
 
-// Console — интерактивное консольное приложение.
+// Console — консольный интерфейс
 type Console struct {
 	svc *service.Service
 	in  *bufio.Reader
 	out io.Writer
 }
 
-// NewConsole создаёт интерфейс, читающий из in и пишущий в out.
+// NewConsole создаёт интерфейс для заданных потоков ввода и вывода
 func NewConsole(svc *service.Service, in io.Reader, out io.Writer) *Console {
 	return &Console{svc: svc, in: bufio.NewReader(in), out: out}
 }
 
-// Run крутит основной цикл: поиск -> выбор -> отчёт -> снова поиск.
-// Завершается, когда пользователь ввёл "q", закрыт ввод или отменён ctx.
+// Run запускает поиск и вывод отчётов до выхода пользователя
 func (c *Console) Run(ctx context.Context) {
 	fmt.Fprintln(c.out, "Поиск интересных мест. Для выхода введите q.")
 
@@ -40,8 +38,7 @@ func (c *Console) Run(ctx context.Context) {
 			continue
 		}
 
-		// Пункт 2: ищем локации. Блокируемся только на ожидании
-		// конечного результата этого шага — это допустимо для консоли.
+		// ждём результат поиска
 		fmt.Fprintln(c.out, "Ищу...")
 		found := <-c.svc.FindLocations(ctx, query)
 		if found.Err != nil {
@@ -58,7 +55,7 @@ func (c *Console) Run(ctx context.Context) {
 			continue
 		}
 
-		// Пункты 4–5: погода, места и описания одним общим отчётом.
+		// загружаем погоду и места одним отчётом
 		fmt.Fprintf(c.out, "\nЗагружаю данные для «%s»...\n", loc.Title())
 		report := <-c.svc.LoadReport(ctx, loc)
 		if ctx.Err() != nil {
@@ -68,7 +65,7 @@ func (c *Console) Run(ctx context.Context) {
 	}
 }
 
-// ask выводит приглашение и читает строку. ok=false, если ввод закончился.
+// ask выводит приглашение и читает строку
 func (c *Console) ask(prompt string) (string, bool) {
 	fmt.Fprint(c.out, prompt)
 	line, err := c.in.ReadString('\n')
@@ -78,8 +75,7 @@ func (c *Console) ask(prompt string) (string, bool) {
 	return strings.TrimSpace(line), true
 }
 
-// choose показывает список локаций и просит выбрать одну (пункт 3).
-// Пустой ввод или 0 — вернуться к поиску.
+// choose показывает найденные локации и возвращает выбранную
 func (c *Console) choose(locs []model.Location) (model.Location, bool) {
 	fmt.Fprintln(c.out, "\nНайдено:")
 	for i, l := range locs {
@@ -100,7 +96,7 @@ func (c *Console) choose(locs []model.Location) (model.Location, bool) {
 	}
 }
 
-// printReport выводит итоговый отчёт целиком (пункт 6).
+// printReport выводит полный отчёт
 func (c *Console) printReport(r model.Report) {
 	line := strings.Repeat("=", 60)
 	fmt.Fprintf(c.out, "\n%s\n%s\n%s\n", line, r.Location.Title(), line)
@@ -145,8 +141,7 @@ func (c *Console) printReport(r model.Report) {
 	fmt.Fprintln(c.out)
 }
 
-// shorten обрезает текст до max символов (именно символов, а не байтов:
-// русские буквы занимают по 2 байта).
+// shorten сокращает текст до заданной длины
 func shorten(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ") // убрать переносы строк и лишние пробелы
 	r := []rune(s)
@@ -156,7 +151,7 @@ func shorten(s string, max int) string {
 	return string(r[:max]) + "..."
 }
 
-// capitalize делает первую букву заглавной.
+// capitalize переводит первую букву в верхний регистр
 func capitalize(s string) string {
 	r := []rune(s)
 	if len(r) == 0 {
