@@ -6,44 +6,65 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/rezmoss/axios4go"
 )
 
 // Client выполняет GET-запросы
 type Client struct {
-	http *http.Client
+	timeout time.Duration
 }
 
 // New создаёт клиент с таймаутом
 func New(timeout time.Duration) *Client {
-	return &Client{http: &http.Client{Timeout: timeout}}
+	return &Client{timeout: timeout}
 }
 
 // GetJSON выполняет запрос и разбирает JSON-ответ
 func (c *Client) GetJSON(ctx context.Context, rawURL string, target any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return cleanError(err)
+	result := make(chan struct {
+		response *axios4go.Response
+		err      error
+	}, 1)
+	options := &axios4go.RequestOptions{
+		Timeout: int(c.timeout / time.Millisecond),
+		Headers: map[string]string{"Accept": "application/json"},
 	}
-	req.Header.Set("Accept", "application/json")
+	axios4go.GetAsync(rawURL, options).
+		Then(func(resp *axios4go.Response) {
+			result <- struct {
+				response *axios4go.Response
+				err      error
+			}{response: resp}
+		}).
+		Catch(func(err error) {
+			result <- struct {
+				response *axios4go.Response
+				err      error
+			}{err: err}
+		})
 
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return cleanError(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return fmt.Errorf("сервер ответил %s: %s", resp.Status, strings.TrimSpace(string(body)))
-	}
-
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-		return fmt.Errorf("не удалось разобрать ответ сервера: %w", err)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case res := <-result:
+		if res.err != nil {
+			return cleanError(res.err)
+		}
+		if res.response.StatusCode < 200 || res.response.StatusCode > 299 {
+			body := res.response.Body
+			if len(body) > 300 {
+				body = body[:300]
+			}
+			return fmt.Errorf("сервер ответил %s: %s", http.StatusText(res.response.StatusCode), strings.TrimSpace(string(body)))
+		}
+		if err := json.Unmarshal(res.response.Body, target); err != nil {
+			return fmt.Errorf("не удалось разобрать ответ сервера: %w", err)
+		}
 	}
 	return nil
 }
