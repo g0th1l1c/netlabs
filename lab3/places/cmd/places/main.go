@@ -11,7 +11,7 @@ import (
 	"places/internal/config"
 	"places/internal/httpclient"
 	"places/internal/service"
-	"places/internal/ui"
+	"places/internal/webui"
 )
 
 func main() {
@@ -25,18 +25,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	client := httpclient.New(cfg.HTTPTimeout)
+	client := httpclient.New(cfg.HTTPTimeout) //передаём таймаут
 
 	svc := service.New(
 		api.NewGraphHopper(client, cfg.GraphHopperKey),
 		api.NewOpenWeather(client, cfg.OpenWeatherKey),
 		api.NewOpenTripMap(client, cfg.OpenTripMapKey),
 		service.Options{
-			RadiusM:         cfg.RadiusM,
+			RadiusM:         cfg.RadiusM, //Радиус поиска достопримечательностей в метрах
 			PlacesLimit:     cfg.PlacesLimit,
-			ParallelDetails: cfg.ParallelDetails,
+			ParallelDetails: cfg.ParallelDetails, //Максимальное количество одновременно выполняемых запросов подробностей о местах
 		},
 	)
 
-	ui.NewConsole(svc, os.Stdin, os.Stdout).Run(ctx)
+	if err := webui.Run(ctx, svc); err != nil {
+		fmt.Fprintln(os.Stderr, "Ошибка интерфейса:", err)
+		os.Exit(1)
+	}
 }

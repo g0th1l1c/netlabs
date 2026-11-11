@@ -38,28 +38,34 @@ type weatherResponse struct {
 }
 
 // Current получает погоду по координатам
-func (o *OpenWeather) Current(ctx context.Context, lat, lon float64) (model.Weather, error) {
+func (o *OpenWeather) CurrentAsync(ctx context.Context, lat, lon float64, done func(model.Weather, error)) {
 	q := url.Values{}
-	q.Set("lat", strconv.FormatFloat(lat, 'f', 6, 64))
-	q.Set("lon", strconv.FormatFloat(lon, 'f', 6, 64))
+	q.Set("lat", strconv.FormatFloat(lat, 'f', 6, 64)) //ширина
+	q.Set("lon", strconv.FormatFloat(lon, 'f', 6, 64)) //долгота
 	q.Set("units", "metric")
 	q.Set("lang", "ru")
 	q.Set("appid", o.Key)
 
 	var resp weatherResponse
-	if err := o.HTTP.GetJSON(ctx, o.BaseURL+"/weather?"+q.Encode(), &resp); err != nil {
-		return model.Weather{}, err
-	}
+	o.HTTP.GetJSON(ctx, o.BaseURL+"/weather?"+q.Encode(), &resp, func(err error) {
+		if err != nil {
+			done(model.Weather{}, err)
+			return
+		}
+		parse := func() (model.Weather, error) {
 
-	w := model.Weather{
-		TempC:       resp.Main.Temp,
-		FeelsLikeC:  resp.Main.FeelsLike,
-		Humidity:    resp.Main.Humidity,
-		PressureHPa: resp.Main.Pressure,
-		WindMS:      resp.Wind.Speed,
-	}
-	if len(resp.Weather) > 0 {
-		w.Description = resp.Weather[0].Description
-	}
-	return w, nil
+			w := model.Weather{
+				TempC:       resp.Main.Temp,
+				FeelsLikeC:  resp.Main.FeelsLike,
+				Humidity:    resp.Main.Humidity,
+				PressureHPa: resp.Main.Pressure,
+				WindMS:      resp.Wind.Speed,
+			}
+			if len(resp.Weather) > 0 {
+				w.Description = resp.Weather[0].Description
+			}
+			return w, nil
+		}
+		done(parse())
+	})
 }

@@ -1,4 +1,4 @@
-// Package api содержит клиенты внешних сервисов
+// содержит клиенты внешних сервисов
 package api
 
 import (
@@ -10,7 +10,6 @@ import (
 	"places/internal/model"
 )
 
-// GraphHopper — клиент геокодинга
 // https://docs.graphhopper.com/#operation/getGeocode
 type GraphHopper struct {
 	HTTP    *httpclient.Client
@@ -42,7 +41,7 @@ type geocodeResponse struct {
 }
 
 // Search ищет локации по названию
-func (g *GraphHopper) Search(ctx context.Context, query string) ([]model.Location, error) {
+func (g *GraphHopper) SearchAsync(ctx context.Context, query string, done func([]model.Location, error)) {
 	q := url.Values{}
 	q.Set("q", query)
 	q.Set("locale", "ru")
@@ -50,26 +49,32 @@ func (g *GraphHopper) Search(ctx context.Context, query string) ([]model.Locatio
 	q.Set("key", g.Key)
 
 	var resp geocodeResponse
-	if err := g.HTTP.GetJSON(ctx, g.BaseURL+"/geocode?"+q.Encode(), &resp); err != nil {
-		return nil, err
-	}
-
-	locations := make([]model.Location, 0, len(resp.Hits))
-	for _, h := range resp.Hits {
-		street := h.Street
-		if street != "" && h.HouseNumber != "" {
-			street += ", " + h.HouseNumber
+	g.HTTP.GetJSON(ctx, g.BaseURL+"/geocode?"+q.Encode(), &resp, func(err error) {
+		if err != nil {
+			done(nil, err)
+			return
 		}
-		locations = append(locations, model.Location{
-			Name:    h.Name,
-			Street:  street,
-			City:    h.City,
-			State:   h.State,
-			Country: h.Country,
-			Type:    h.OsmValue,
-			Lat:     h.Point.Lat,
-			Lon:     h.Point.Lng,
-		})
-	}
-	return locations, nil
+		parse := func() ([]model.Location, error) {
+			locations := make([]model.Location, 0, len(resp.Hits))
+			//0 - сколько элементов сейчас находится в срезе,len(resp.Hits) - сколько элементов можно разместить
+			for _, h := range resp.Hits {
+				street := h.Street
+				if street != "" && h.HouseNumber != "" {
+					street += ", " + h.HouseNumber
+				}
+				locations = append(locations, model.Location{
+					Name:    h.Name,
+					Street:  street,
+					City:    h.City,
+					State:   h.State,
+					Country: h.Country,
+					Type:    h.OsmValue,
+					Lat:     h.Point.Lat,
+					Lon:     h.Point.Lng,
+				})
+			}
+			return locations, nil
+		}
+		done(parse())
+	})
 }

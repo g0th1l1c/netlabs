@@ -23,55 +23,63 @@ func NewOpenTripMap(h *httpclient.Client, key string) *OpenTripMap {
 	return &OpenTripMap{HTTP: h, Key: key, BaseURL: "https://api.opentripmap.com/0.1/ru"}
 }
 
-type radiusItem struct {
+type radiusItem struct { //одно найденное интересное место
 	Xid   string  `json:"xid"`
 	Name  string  `json:"name"`
 	Kinds string  `json:"kinds"`
-	Dist  float64 `json:"dist"`
+	Dist  float64 `json:"dist"` //расстояние от заданной точки в метрах
 	Rate  float64 `json:"rate"`
 }
 
 // Nearby ищет места в заданном радиусе
-func (o *OpenTripMap) Nearby(ctx context.Context, lat, lon float64, radiusM, limit int) ([]model.PlaceBrief, error) {
+func (o *OpenTripMap) NearbyAsync(ctx context.Context, lat, lon float64, radiusM, limit int, done func([]model.PlaceBrief, error)) {
 	q := url.Values{}
 	q.Set("radius", strconv.Itoa(radiusM))
 	q.Set("lat", strconv.FormatFloat(lat, 'f', 6, 64))
 	q.Set("lon", strconv.FormatFloat(lon, 'f', 6, 64))
-	// запрашиваем с запасом, чтобы отсеять места без названий
+	// запрашиваем с запасомчтобы отсеять места без названий
 	q.Set("limit", strconv.Itoa(limit*3))
 	q.Set("format", "json")
 	q.Set("apikey", o.Key)
 
 	var items []radiusItem
-	if err := o.HTTP.GetJSON(ctx, o.BaseURL+"/places/radius?"+q.Encode(), &items); err != nil {
-		return nil, err
-	}
-
-	sort.SliceStable(items, func(i, j int) bool { return items[i].Dist < items[j].Dist })
-
-	places := make([]model.PlaceBrief, 0, limit)
-	for _, it := range items {
-		if strings.TrimSpace(it.Name) == "" || it.Xid == "" {
-			continue
+	o.HTTP.GetJSON(ctx, o.BaseURL+"/places/radius?"+q.Encode(), &items, func(err error) {
+		if err != nil {
+			done(nil, err)
+			return
 		}
-		places = append(places, model.PlaceBrief{
-			Xid:      it.Xid,
-			Name:     it.Name,
-			Kinds:    it.Kinds,
-			Distance: it.Dist,
-			Rate:     it.Rate,
-		})
-		if len(places) == limit {
-			break
+		parse := func() ([]model.PlaceBrief, error) {
+			//сортировка нашего слайса
+			sort.SliceStable(items, func(i, j int) bool {
+				return items[i].Dist < items[j].Dist
+			})
+
+			places := make([]model.PlaceBrief, 0, limit)
+			for _, it := range items {
+				if strings.TrimSpace(it.Name) == "" || it.Xid == "" {
+					continue
+				}
+				places = append(places, model.PlaceBrief{
+					Xid:      it.Xid,
+					Name:     it.Name,
+					Kinds:    it.Kinds,
+					Distance: it.Dist,
+					Rate:     it.Rate,
+				})
+				if len(places) == limit {
+					break
+				}
+			}
+			return places, nil
 		}
-	}
-	return places, nil
+		done(parse())
+	})
 }
 
 type detailsResponse struct {
 	URL     string `json:"url"`
 	Preview struct {
-		Source string `json:"source"`
+		Source string `json:"source"` //ссылка на изображение
 	} `json:"preview"`
 	Address struct {
 		City        string `json:"city"`
@@ -87,32 +95,38 @@ type detailsResponse struct {
 }
 
 // Details получает описание места
-func (o *OpenTripMap) Details(ctx context.Context, xid string) (model.PlaceDetails, error) {
+func (o *OpenTripMap) DetailsAsync(ctx context.Context, xid string, done func(model.PlaceDetails, error)) {
 	q := url.Values{}
 	q.Set("apikey", o.Key)
 
 	var resp detailsResponse
-	if err := o.HTTP.GetJSON(ctx, o.BaseURL+"/places/xid/"+url.PathEscape(xid)+"?"+q.Encode(), &resp); err != nil {
-		return model.PlaceDetails{}, err
-	}
-
-	// используем описание Википедии или OpenTripMap
-	descr := strings.TrimSpace(resp.WikipediaExtracts.Text)
-	if descr == "" {
-		descr = strings.TrimSpace(resp.Info.Descr)
-	}
-
-	var addr []string
-	for _, part := range []string{resp.Address.City, resp.Address.Road, resp.Address.HouseNumber} {
-		if part != "" {
-			addr = append(addr, part)
+	o.HTTP.GetJSON(ctx, o.BaseURL+"/places/xid/"+url.PathEscape(xid)+"?"+q.Encode(), &resp, func(err error) {
+		if err != nil {
+			done(model.PlaceDetails{}, err)
+			return
 		}
-	}
+		parse := func() (model.PlaceDetails, error) {
 
-	return model.PlaceDetails{
-		Description: descr,
-		Address:     strings.Join(addr, ", "),
-		URL:         resp.URL,
-		Image:       resp.Preview.Source,
-	}, nil
+			// используем описание Википедии или OpenTripMap
+			descr := strings.TrimSpace(resp.WikipediaExtracts.Text)
+			if descr == "" {
+				descr = strings.TrimSpace(resp.Info.Descr)
+			}
+
+			var addr []string
+			for _, part := range []string{resp.Address.City, resp.Address.Road, resp.Address.HouseNumber} {
+				if part != "" {
+					addr = append(addr, part)
+				}
+			}
+
+			return model.PlaceDetails{
+				Description: descr,
+				Address:     strings.Join(addr, ", "),
+				URL:         resp.URL,
+				Image:       resp.Preview.Source,
+			}, nil
+		}
+		done(parse())
+	})
 }
