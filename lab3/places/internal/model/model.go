@@ -1,4 +1,4 @@
-// Package model хранит структуры данных приложения
+// хранит структуры данных приложения
 package model
 
 import "strings"
@@ -11,17 +11,17 @@ type Location struct {
 	State   string
 	Country string
 	Type    string
-	Lat     float64
-	Lon     float64
+	Lat     float64 //геогр. ширина
+	Lon     float64 //геогр. долгота
 }
 
 // Title собирает название локации в одну строку
 func (l Location) Title() string {
 	parts := []string{l.Name, l.Street, l.City, l.State, l.Country}
-	var out []string
+	var out []string//только подходящие строки
 	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" || contains(out, p) {
+		p = strings.TrimSpace(p)//убираем пробелы
+		if p == "" || contains(out, p) { // строка уже встречалась
 			continue
 		}
 		out = append(out, p)
@@ -50,7 +50,7 @@ type Weather struct {
 
 // PlaceBrief — краткие данные о месте
 type PlaceBrief struct {
-	Xid      string
+	Xid      string //уникальный id места
 	Name     string
 	Kinds    string  // категории через запятую
 	Rate     float64 // рейтинг OpenTripMap, если доступен

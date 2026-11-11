@@ -12,18 +12,18 @@ import (
 
 // Geocoder ищет локации
 type Geocoder interface {
-	Search(ctx context.Context, query string) ([]model.Location, error)
+	SearchAsync(ctx context.Context, query string, done func([]model.Location, error))
 }
 
 // WeatherProvider получает погоду
 type WeatherProvider interface {
-	Current(ctx context.Context, lat, lon float64) (model.Weather, error)
+	CurrentAsync(ctx context.Context, lat, lon float64, done func(model.Weather, error))
 }
 
 // PlacesProvider получает места и их описания
 type PlacesProvider interface {
-	Nearby(ctx context.Context, lat, lon float64, radiusM, limit int) ([]model.PlaceBrief, error)
-	Details(ctx context.Context, xid string) (model.PlaceDetails, error)
+	NearbyAsync(ctx context.Context, lat, lon float64, radiusM, limit int, done func([]model.PlaceBrief, error))
+	DetailsAsync(ctx context.Context, xid string, done func(model.PlaceDetails, error))
 }
 
 // Options — параметры поиска
@@ -55,89 +55,100 @@ type LocationsResult struct {
 	Err       error
 }
 
-// FindLocations запускает поиск и возвращает канал с результатом
+// возвращает канал с конечным результатом поиска
 func (s *Service) FindLocations(ctx context.Context, query string) <-chan LocationsResult {
-	// буфер позволяет завершить горутину без ожидающего получателя
 	out := make(chan LocationsResult, 1)
-
-	go func() {
-		query := strings.TrimSpace(query)
-		if query == "" {
-			out <- LocationsResult{Err: errors.New("пустой запрос")}
-			return
-		}
-		locs, err := s.geo.Search(ctx, query)
+	query = strings.TrimSpace(query)
+	if query == "" {
+		out <- LocationsResult{Err: errors.New("пустой запрос")}
+		close(out) //закрывам канал - никто не может туда писать
+		return out
+	}
+	s.geo.SearchAsync(ctx, query, func(locs []model.Location, err error) {
 		out <- LocationsResult{Locations: locs, Err: err}
-	}()
-
+		close(out)
+	})
 	return out
 }
 
-// LoadReport параллельно получает погоду и места, затем собирает отчёт
+// отправляет отчёт 
 func (s *Service) LoadReport(ctx context.Context, loc model.Location) <-chan model.Report {
 	out := make(chan model.Report, 1)
-
-	go func() {
-		report := model.Report{Location: loc}
-
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		// загружаем погоду
-		go func() {
-			defer wg.Done()
-			w, err := s.weather.Current(ctx, loc.Lat, loc.Lon)
-			if err != nil {
-				report.WeatherErr = err
-				return
+	report := model.Report{Location: loc}
+	var mu sync.Mutex
+	remaining := 2 //для 2 независимых задач
+	finish := func(update func()) {
+		mu.Lock()
+		update()
+		remaining--
+		if remaining == 0 {
+			out <- report
+			close(out)
+		}
+		mu.Unlock()
+	}
+	
+	s.weather.CurrentAsync(ctx, loc.Lat, loc.Lon, func(w model.Weather, err error) { //погода
+		finish(func() {
+			report.WeatherErr = err
+			if err == nil {
+				report.Weather = &w
 			}
-			report.Weather = &w
-		}()
-
-		// загружаем места и их описания
-		go func() {
-			defer wg.Done()
-			report.Places, report.PlacesErr = s.loadPlaces(ctx, loc)
-		}()
-
-		// ждём обе ветки перед отправкой отчёта
-		wg.Wait()
-		out <- report
-	}()
-
+		})
+	})
+	s.loadPlaces(ctx, loc, func(p []model.Place, err error) { //достопримечательности
+		finish(func() { report.Places = p; report.PlacesErr = err })
+	})
 	return out
 }
 
-// loadPlaces получает места и параллельно загружает описания
-func (s *Service) loadPlaces(ctx context.Context, loc model.Location) ([]model.Place, error) {
-	briefs, err := s.places.Nearby(ctx, loc.Lat, loc.Lon, s.opts.RadiusM, s.opts.PlacesLimit)
-	if err != nil {
-		return nil, err
-	}
-
-	places := make([]model.Place, len(briefs))
-
-	// ограничиваем число одновременных запросов
-	sem := make(chan struct{}, s.opts.ParallelDetails)
-	var wg sync.WaitGroup
-
-	for i, b := range briefs {
-		places[i].PlaceBrief = b
-
-		wg.Add(1)
-		go func(i int, xid string) {
-			defer wg.Done()
-
-			sem <- struct{}{}        // занять слот
-			defer func() { <-sem }() // освободить слот
-
-			// каждая горутина заполняет свою запись
-			d, err := s.places.Details(ctx, xid)
-			places[i].PlaceDetails = d
-			places[i].DetailsErr = err
-		}(i, b.Xid)
-	}
-
-	wg.Wait()
-	return places, nil
+// получение списка запускает цепочки описаний без ожидания в вызывающем коде
+func (s *Service) loadPlaces(ctx context.Context, loc model.Location, done func([]model.Place, error)) {
+	s.places.NearbyAsync(ctx, loc.Lat, loc.Lon, s.opts.RadiusM, s.opts.PlacesLimit, func(briefs []model.PlaceBrief, err error) {
+		if err != nil {
+			done(nil, err)
+			return
+		}
+		places := make([]model.Place, len(briefs))
+		if len(briefs) == 0 {
+			done(places, nil)
+			return
+		}
+		var mu sync.Mutex
+		next, remaining := 0, len(briefs)
+		//next - индекс следующего места, подробности которого ещё не начали загружать
+		//remaining - сколько запросов подробностей ещё не завершилось, включая те, которые пока не запущены
+		var launch func() //предварительно объявляем переменную чтобы впредь могли ссылаться на саму себя
+		launch = func() { //загружаем подробности о достопримечательности
+			mu.Lock()
+			if next == len(briefs) {
+				mu.Unlock()
+				return
+			}
+			i := next
+			next++
+			mu.Unlock()
+			complete := func(d model.PlaceDetails, err error) {//когда завершится загрузка подробностей одного места
+				mu.Lock()
+				places[i] = model.Place{PlaceBrief: briefs[i], PlaceDetails: d, DetailsErr: err}
+				remaining--
+				last := remaining == 0
+				mu.Unlock()
+				if last { 
+					done(places, nil)//вызывается после обработки всех достопримечательностей
+					return
+				}
+				// продолжение запускает следующий запрос после освобождения места
+				go launch()
+			}
+			if err := ctx.Err(); err != nil {
+				complete(model.PlaceDetails{}, err)
+				return
+			}
+			s.places.DetailsAsync(ctx, briefs[i].Xid, complete)
+		}
+		for i := 0; i < s.opts.ParallelDetails && i < len(briefs); i++ {
+			launch()
+		}
+	})
 }

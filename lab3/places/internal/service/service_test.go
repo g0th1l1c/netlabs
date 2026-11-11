@@ -161,3 +161,16 @@ func TestLoadReportRespectsParallelLimit(t *testing.T) {
 		t.Fatalf("одновременно шло %d запросов, лимит 2", fp.maxSeen)
 	}
 }
+
+func (f fakeGeo) SearchAsync(ctx context.Context, q string, done func([]model.Location, error)) {
+	go func() { done(f.Search(ctx, q)) }()
+}
+func (f fakeWeather) CurrentAsync(ctx context.Context, lat, lon float64, done func(model.Weather, error)) {
+	go func() { done(f.Current(ctx, lat, lon)) }()
+}
+func (f *fakePlaces) NearbyAsync(ctx context.Context, lat, lon float64, r, l int, done func([]model.PlaceBrief, error)) {
+	go func() { done(f.Nearby(ctx, lat, lon, r, l)) }()
+}
+func (f *fakePlaces) DetailsAsync(ctx context.Context, xid string, done func(model.PlaceDetails, error)) {
+	go func() { done(f.Details(ctx, xid)) }()
+}

@@ -36,7 +36,7 @@ func Load() (Config, error) {
 		HTTPTimeout:     time.Duration(intEnv("HTTP_TIMEOUT_SEC", 10)) * time.Second,
 	}
 
-	var missing []string
+	var missing []string //собираем все невведённые апи
 	if cfg.GraphHopperKey == "" {
 		missing = append(missing, "GRAPHHOPPER_KEY")
 	}
@@ -64,7 +64,7 @@ func intEnv(name string, def int) int {
 	return v
 }
 
-// loadDotEnv загружает переменные из файла, не заменяя заданные в системе
+// loadDotEnv загружает переменные из файла
 func loadDotEnv(path string) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -85,7 +85,7 @@ func loadDotEnv(path string) {
 		key = strings.TrimSpace(key)
 		value = strings.Trim(strings.TrimSpace(value), `"'`)
 		if key != "" && os.Getenv(key) == "" {
-			os.Setenv(key, value)
+			os.Setenv(key, value) //устанавливаем переменную окружения
 		}
 	}
 }

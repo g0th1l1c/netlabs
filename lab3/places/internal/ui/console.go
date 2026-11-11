@@ -40,7 +40,7 @@ func (c *Console) Run(ctx context.Context) {
 
 		// ждём результат поиска
 		fmt.Fprintln(c.out, "Ищу...")
-		found := <-c.svc.FindLocations(ctx, query)
+		found := <-c.svc.FindLocations(ctx, query) // возвращаем канал
 		if found.Err != nil {
 			fmt.Fprintf(c.out, "Ошибка поиска: %v\n", found.Err)
 			continue
