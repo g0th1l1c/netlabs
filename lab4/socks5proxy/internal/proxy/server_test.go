@@ -1,12 +1,63 @@
 package proxy
 
 import (
+	"bytes"
 	"syscall"
 	"testing"
 	"time"
 
 	"socks5proxy/internal/poller"
 )
+
+func TestHangupPreservesBufferedDataToOtherPeer(t *testing.T) {
+	for _, target := range []bool{false, true} {
+		srv, err := New(0, syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}, Port: 53})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer syscall.Close(srv.lfd)
+		defer syscall.Close(srv.dns.Fd())
+		client, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_NONBLOCK, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		remote, err := syscall.Socketpair(syscall.AF_UNIX, syscall.SOCK_STREAM|syscall.SOCK_NONBLOCK, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer syscall.Close(client[1])
+		defer syscall.Close(remote[1])
+		newSession(srv, client[0])
+		s := srv.fds[client[0]].s
+		s.tfd, s.state = remote[0], stRelay
+		defer s.close()
+		source, recipient, buffer := client[1], remote[1], &s.c2t
+		if target {
+			source, recipient, buffer = remote[1], client[1], &s.t2c
+		}
+		want := []byte("queued bytes")
+		buffer.put(want)
+		syscall.Shutdown(source, syscall.SHUT_RDWR)
+		s.onEvent(target, poller.Hup)
+		if s.closed {
+			t.Fatal("hangup closed session before flushing")
+		}
+		s.onEvent(!target, poller.Out)
+		got := make([]byte, len(want))
+		n, err := syscall.Read(recipient, got)
+		if err != nil || n != len(want) || !bytes.Equal(got, want) || !s.closed {
+			t.Fatalf("target=%v got=%q n=%d err=%v closed=%v", target, got, n, err, s.closed)
+		}
+	}
+}
+
+func TestRejectNonzeroReservedByte(t *testing.T) {
+	s := session{state: stRequest, t2c: newBuffer()}
+	s.parseRequest([]byte{ver5, cmdConnect, 1, atypIPv4, 127, 0, 0, 1, 0, 80})
+	if !s.failed || !bytes.Equal(s.t2c.readable(), reply(repFailure, [4]byte{}, 0)) {
+		t.Fatal("nonzero RSV was not rejected")
+	}
+}
 
 func reviewConnect(t *testing.T, lfd int) int {
 	t.Helper()
@@ -42,7 +93,7 @@ func reviewResetAndFill(t *testing.T, fd int) {
 }
 
 func TestReviewEventBatchDescriptorReuse(t *testing.T) {
-	srv, err := New(0, [4]byte{127, 0, 0, 1})
+	srv, err := New(0, syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}, Port: 53})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +165,7 @@ func TestReviewEventBatchDescriptorReuse(t *testing.T) {
 }
 
 func TestAcceptResumesWithoutSessions(t *testing.T) {
-	srv, err := New(0, [4]byte{127, 0, 0, 1})
+	srv, err := New(0, syscall.SockaddrInet4{Addr: [4]byte{127, 0, 0, 1}, Port: 53})
 	if err != nil {
 		t.Fatal(err)
 	}

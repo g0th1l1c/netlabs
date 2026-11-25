@@ -3,6 +3,8 @@ package dns
 import (
 	"bytes"
 	"testing"
+
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 func TestBuildQuery(t *testing.T) {
@@ -32,12 +34,42 @@ func TestParseResponseCNAMEThenA(t *testing.T) {
 	msg := []byte{
 		0xab, 0xcd, 0x81, 0x80, 0, 1, 0, 2, 0, 0, 0, 0,
 		3, 'w', 'w', 'w', 0, 0, 1, 0, 1, // вопрос
-		0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 60, 0, 2, 0xc0, 12, // cname
-		0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 1, 2, 3, 4, // a
+		0xc0, 12, 0, 5, 0, 1, 0, 0, 0, 60, 0, 5, 3, 'a', 'p', 'p', 0,
+		3, 'a', 'p', 'p', 0, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 1, 2, 3, 4,
 	}
 	id, ip, err := parseResponse(msg)
 	if err != nil || id != 0xabcd || ip != [4]byte{1, 2, 3, 4} {
 		t.Fatalf("id=%x ip=%v err=%v", id, ip, err)
+	}
+}
+
+func TestResponseAddressMatchesAliasChain(t *testing.T) {
+	record := func(owner string, body dnsmessage.ResourceBody) dnsmessage.Resource {
+		return dnsmessage.Resource{
+			Header: dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(owner), Class: dnsmessage.ClassINET},
+			Body:   body,
+		}
+	}
+	m := dnsmessage.Message{
+		Header:    dnsmessage.Header{Response: true},
+		Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName("WWW.test.")}},
+		Answers: []dnsmessage.Resource{
+			record("other.test.", &dnsmessage.AResource{A: [4]byte{9, 9, 9, 9}}),
+			record("dst.test.", &dnsmessage.AResource{A: [4]byte{1, 2, 3, 4}}),
+			record("mid.test.", &dnsmessage.CNAMEResource{CNAME: dnsmessage.MustNewName("DST.test.")}),
+			record("www.test.", &dnsmessage.CNAMEResource{CNAME: dnsmessage.MustNewName("mid.test.")}),
+		},
+	}
+	if ip, err := responseIP(&m); ip != [4]byte{1, 2, 3, 4} || err != nil {
+		t.Fatalf("ip=%v err=%v", ip, err)
+	}
+	m.Answers = m.Answers[:1]
+	if _, err := responseIP(&m); err != ErrNotFound {
+		t.Fatalf("unrelated address: %v", err)
+	}
+	m.Answers = append(m.Answers, record("www.test.", &dnsmessage.CNAMEResource{CNAME: dnsmessage.MustNewName("WWW.test.")}))
+	if _, err := responseIP(&m); err != ErrFormat {
+		t.Fatalf("alias loop: %v", err)
 	}
 }
 

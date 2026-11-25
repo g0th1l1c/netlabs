@@ -10,10 +10,10 @@ import (
 	"socks5proxy/internal/poller"
 )
 
-type state int
+type state int //текущее состояние подключения клиента
 
 const (
-	stGreeting   state = iota // ждём список методов аутентификации
+	stGreeting   state = iota //ждём список методов аутентификации
 	stRequest                 // ждём запрос connect
 	stResolving               // ждём dns-ответ
 	stConnecting              // ждём завершения connect к цели
@@ -24,16 +24,16 @@ const (
 type session struct {
 	srv    *Server
 	cfd    int // сокет клиента
-	tfd    int // сокет цели, -1 пока нет
+	tfd    int // сокет цели(сайта), -1 пока нет
 	state  state
 	query  *dns.Query
-	port   uint16 // порт цели для dns-случая
+	port   uint16 // порт цели
 	c2t    buffer // клиент -> цель (на этапе рукопожатия: вход от клиента)
 	t2c    buffer // цель -> клиент (на этапе рукопожатия: ответы клиенту)
 	cEOF   bool   // клиент закрыл свою запись
 	tEOF   bool   // цель закрыла свою запись
-	cShut  bool   // мы закрыли запись клиенту
-	tShut  bool   // мы закрыли запись цели
+	cShut  bool   // мы закрыли запись клиенту(передали цели)
+	tShut  bool   // мы закрыли запись цели(передали клиенту)
 	cMask  uint32 // события клиента в селекторе, 0 — не зарегистрирован
 	tMask  uint32
 	failed bool // закрыть после отправки накопленного ответа
@@ -44,10 +44,11 @@ func newSession(srv *Server, cfd int) {
 	s := &session{srv: srv, cfd: cfd, tfd: -1, c2t: newBuffer(), t2c: newBuffer()}
 	srv.fds[cfd] = owner{s: s}
 	syscall.SetsockoptInt(cfd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-	s.update()
+	//настраиваем протокол tcp а не сокета, отключаем задержку некоторых маленьких отправок ради объединения данных
+	s.update() //регистрация в epoll
 }
 
-// onEvent обрабатывает событие одного из сокетов сессии.
+// onEvent обрабатывает событие одного из сокетов сессии
 func (s *session) onEvent(target bool, ev uint32) {
 	if target {
 		s.onTarget(ev)
@@ -58,26 +59,46 @@ func (s *session) onEvent(target bool, ev uint32) {
 }
 
 func (s *session) onClient(ev uint32) {
-	if ev&poller.Err != 0 {
-		s.close()
+	if ev&poller.Hup != 0 {
+		if s.state <= stRequest {
+			s.close()
+			return
+		}
+		// В этот сокет писать больше нельзя, но из него ещё можно читать.
+		s.cShut = true
+		s.t2c.r = s.t2c.w
+		if !s.cEOF && !s.tShut && !s.failed {
+			s.readClient()
+		}
 		return
 	}
-	if ev&poller.In != 0 {
+	if ev&poller.Err != 0 {
+		s.close() //закрываем  всю сессию
+		return
+	}
+	if ev&poller.In != 0 && !s.tShut && !s.failed {
 		s.readClient()
 	}
 	if !s.closed && ev&poller.Out != 0 && !send(s.cfd, &s.t2c) {
 		s.close()
 		return
 	}
-	if !s.closed && ev&poller.Hup != 0 && ev&poller.In == 0 {
-		s.close()
-	}
 }
 
 func (s *session) onTarget(ev uint32) {
 	if s.state == stConnecting {
 		if ev&(poller.Out|poller.Err|poller.Hup) != 0 {
-			s.finishConnect()
+			s.finishConnect() //удалось ли установить соединение
+		}
+		if s.state != stRelay {
+			return
+		}
+	}
+	if ev&poller.Hup != 0 {
+		s.tShut = true
+		s.c2t.r = s.c2t.w
+		if !s.tEOF && !s.cShut {
+			s.readTarget()
 		}
 		return
 	}
@@ -85,21 +106,22 @@ func (s *session) onTarget(ev uint32) {
 		s.close()
 		return
 	}
-	if ev&poller.In != 0 {
-		eof, ok := recv(s.tfd, &s.t2c)
-		if !ok {
-			s.close()
-			return
-		}
-		s.tEOF = s.tEOF || eof
+	if ev&poller.In != 0 && !s.cShut {
+		s.readTarget()
 	}
 	if !s.closed && ev&poller.Out != 0 && !send(s.tfd, &s.c2t) {
 		s.close()
 		return
 	}
-	if !s.closed && ev&poller.Hup != 0 && ev&poller.In == 0 {
+}
+
+func (s *session) readTarget() {
+	eof, ok := recv(s.tfd, &s.t2c)
+	if !ok {
 		s.close()
+		return
 	}
+	s.tEOF = s.tEOF || eof
 }
 
 func (s *session) readClient() {
@@ -120,13 +142,13 @@ func (s *session) readClient() {
 	}
 }
 
-// handshake разбирает накопленные байты рукопожатия.
-// лишние байты после запроса остаются в c2t как данные для цели.
+// handshake разбирает накопленные байты рукопожатия
+// лишние байты после запроса остаются в c2t как данные для цели
 func (s *session) handshake() {
 	for !s.closed && !s.failed {
 		data := s.c2t.readable()
 		switch s.state {
-		case stGreeting:
+		case stGreeting: //ожидание приветствия
 			if len(data) < 2 {
 				return
 			}
@@ -134,11 +156,11 @@ func (s *session) handshake() {
 				s.close()
 				return
 			}
-			n := int(data[1])
+			n := int(data[1]) //к-во способов аутентификации
 			if len(data) < 2+n {
-				return
+				return //ждем оставшиеся байты
 			}
-			hasNoAuth := bytes.IndexByte(data[2:2+n], methodNoAuth) >= 0
+			hasNoAuth := bytes.IndexByte(data[2:2+n], methodNoAuth) >= 0 //можно ли без авторизации
 			s.c2t.r += 2 + n
 			if !hasNoAuth {
 				s.t2c.put([]byte{ver5, methodNoAccepted})
@@ -156,7 +178,7 @@ func (s *session) handshake() {
 	}
 }
 
-func (s *session) parseRequest(data []byte) {
+func (s *session) parseRequest(data []byte) { //узнаем куда подключаться
 	if len(data) < 4 {
 		return
 	}
@@ -164,11 +186,15 @@ func (s *session) parseRequest(data []byte) {
 		s.close()
 		return
 	}
-	if data[1] != cmdConnect {
+	if data[2] != 0 {
+		s.fail(repFailure)
+		return
+	}
+	if data[1] != cmdConnect { //установить TCP-соединение?
 		s.fail(repCmdNotSupported)
 		return
 	}
-	var need int
+	var need int //полная длина socks5 запроса
 	switch data[3] {
 	case atypIPv4:
 		need = 4 + 4 + 2
@@ -208,8 +234,8 @@ func (s *session) resolve(name string, port uint16) {
 	s.query = q
 }
 
-// onResolved вызывается резолвером; не из обработчика событий сессии.
-func (s *session) onResolved(ip [4]byte, err error) {
+// onResolved вызывается резолвером
+func (s *session) onResolved(ip [4]byte, err error) { //(получили ответ dns)
 	s.query = nil
 	if s.closed {
 		return
@@ -251,7 +277,7 @@ func (s *session) finishConnect() {
 		v = int(syscall.EIO)
 	}
 	if v != 0 {
-		s.dropTarget()
+		s.dropTarget() //закрываем сокет сайта
 		s.fail(repFromErrno(syscall.Errno(v)))
 		return
 	}
@@ -287,16 +313,16 @@ func (s *session) dropTarget() {
 	s.tfd, s.tMask = -1, 0
 }
 
-// update аккуратно закрывает половины соединений и пересчитывает
+// update аккуратно закрывает соединения и пересчитывает
 // набор событий каждого сокета: ждём только то, что реально можно сделать.
-// благодаря этому селектор никогда не будит программу вхолостую.
 func (s *session) update() {
-	if s.closed {
+	if s.closed { //сессия закрыта
 		return
 	}
-	if s.state == stRelay {
+	if s.state == stRelay { //пересылка данных
+		//браузер завершил отправку данных,уже переслали сайту всё что получили от браузера,ещё не завершали отправку в сокет сайта
 		if s.cEOF && s.c2t.empty() && !s.tShut {
-			syscall.Shutdown(s.tfd, syscall.SHUT_WR)
+			syscall.Shutdown(s.tfd, syscall.SHUT_WR) //Запретить дальнейшую отправку данных через этот сокет, но оставить возможность получать данные
 			s.tShut = true
 		}
 		if s.tEOF && s.t2c.empty() && !s.cShut {
@@ -313,8 +339,8 @@ func (s *session) update() {
 		return
 	}
 
-	var cm, tm uint32
-	if !s.cEOF && !s.failed && s.c2t.hasSpace() {
+	var cm, tm uint32 //события на клиентском сокете,сокете сайта
+	if !s.cEOF && !s.tShut && !s.failed && s.c2t.hasSpace() {
 		cm |= poller.In
 	}
 	if !s.t2c.empty() {
@@ -325,7 +351,7 @@ func (s *session) update() {
 		case stConnecting:
 			tm = poller.Out
 		case stRelay:
-			if !s.tEOF && s.t2c.hasSpace() {
+			if !s.tEOF && !s.cShut && s.t2c.hasSpace() {
 				tm |= poller.In
 			}
 			if !s.c2t.empty() {
@@ -333,14 +359,14 @@ func (s *session) update() {
 			}
 		}
 	}
-	if !s.setMask(false, cm) || !s.setMask(true, tm) {
+	if !s.setMask(false, cm) || !s.setMask(true, tm) { //применяем маски к epoll
 		s.close()
 	}
 }
 
 // setMask приводит регистрацию сокета в селекторе к нужной маске.
 func (s *session) setMask(target bool, want uint32) bool {
-	fd, cur := s.cfd, &s.cMask
+	fd, cur := s.cfd, &s.cMask //текущая маска
 	if target {
 		fd, cur = s.tfd, &s.tMask
 	}

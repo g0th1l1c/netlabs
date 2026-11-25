@@ -29,7 +29,7 @@ func reply(code byte, addr [4]byte, port uint16) []byte {
 	return []byte{ver5, code, 0, atypIPv4, addr[0], addr[1], addr[2], addr[3], byte(port >> 8), byte(port)}
 }
 
-// repFromErrno переводит ошибку connect в код ответа socks5.
+// repFromErrno переводит ошибку connect в код ответа socks5
 func repFromErrno(err error) byte {
 	switch err {
 	case syscall.ECONNREFUSED:
