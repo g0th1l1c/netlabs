@@ -4,6 +4,7 @@ package dns
 
 import (
 	"bufio"
+	"container/list"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
@@ -17,9 +18,10 @@ import (
 )
 
 const (
-	queryTimeout = 5 * time.Second // время ожидания ответа
-	maxPending   = 4096            // предел одновременных запросов
-	maxPacket    = 1500
+	queryTimeout = 5 * time.Second // время ожидания ответа перед повторной попыткой
+	maxAttempts  = 3
+	maxPending   = 4096 // предел одновременных запросов
+	maxPacket    = 1500 //размер буфера для приёма DNS-датаграммы
 )
 
 // ошибки резолвинга
@@ -32,42 +34,48 @@ var (
 	ErrBusy     = errors.New("dns: слишком много запросов")
 )
 
-// Callback вызывается один раз: с адресом или с ошибкой.
+// Callback вызывается один раз: с адресом или с ошибкой
 type Callback func(ip [4]byte, err error)
 
-// Query — ожидающий ответа запрос.
+// Query — ожидающий ответа запрос
 type Query struct {
 	name     string
 	id       uint16
-	deadline time.Time
+	deadline time.Time //время следующей проверки
 	cb       Callback
-	done     bool
+	timer    *list.Element
+	packet   []byte //сохраняем готовый dns пакет чтобы повторить отправку если надо
+	attempts int
 }
 
-// Resolver держит udp-сокет и очередь запросов.
+// Resolver держит udp-сокет и очередь запросов
 type Resolver struct {
 	fd      int
-	server  syscall.SockaddrInet4
-	pending map[uint16]*Query
-	queue   []*Query // в порядке дедлайнов (таймаут у всех одинаковый)
+	server  syscall.SockaddrInet4 //адрес dns сервака
+	pending map[uint16]*Query     //словарь запросов
+	queue   list.List             //очередь запросов, в порядке дедлайнов
 	buf     []byte
 }
 
-// New создаёт неблокирующийся udp-сокет для резолвера server:53.
-func New(server [4]byte) (*Resolver, error) {
+// New создаёт неблокирующийся UDP-сокет для указанного адреса и порта DNS
+func New(server syscall.SockaddrInet4) (*Resolver, error) {
+	if server.Port < 1 || server.Port > 65535 {
+		return nil, errors.New("dns: некорректный порт")
+	}
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC, 0)
+	//семейство адресов(4 или 6),данные пакетами,неблкирующий режим,выбрать стандартный протокол на основе типа сокета(udp)
 	if err != nil {
 		return nil, err
 	}
 	return &Resolver{
 		fd:      fd,
-		server:  syscall.SockaddrInet4{Port: 53, Addr: server},
+		server:  server,
 		pending: make(map[uint16]*Query),
 		buf:     make([]byte, maxPacket),
 	}, nil
 }
 
-// SystemServer читает первый ipv4 nameserver из /etc/resolv.conf.
+// SystemServer читает первый ipv4 nameserver из /etc/resolv.conf
 func SystemServer() ([4]byte, error) {
 	f, err := os.Open("/etc/resolv.conf")
 	if err != nil {
@@ -95,10 +103,10 @@ func (r *Resolver) Query(name string, cb Callback) (*Query, error) {
 	if len(r.pending) >= maxPending {
 		return nil, ErrBusy
 	}
-	var id uint16
+	var id uint16 //генерим уникальный id
 	for {
 		var b [2]byte
-		if _, err := rand.Read(b[:]); err != nil {
+		if _, err := rand.Read(b[:]); err != nil { //Заполняем массив случайными байтами
 			return nil, err
 		}
 		id = binary.BigEndian.Uint16(b[:])
@@ -110,21 +118,38 @@ func (r *Resolver) Query(name string, cb Callback) (*Query, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := syscall.Sendto(r.fd, msg, 0, &r.server); err != nil {
+	q := &Query{name: strings.TrimSuffix(name, ".") + ".", id: id, packet: msg, cb: cb}
+	if err := r.attempt(q, time.Now()); err != nil {
 		return nil, err
 	}
-	q := &Query{name: strings.TrimSuffix(name, ".") + ".", id: id, deadline: time.Now().Add(queryTimeout), cb: cb}
 	r.pending[id] = q
-	r.queue = append(r.queue, q)
+	q.timer = r.queue.PushBack(q)
 	return q, nil
 }
 
-// Cancel отменяет запрос, колбэк не будет вызван.
-func (r *Resolver) Cancel(q *Query) {
-	if q != nil && !q.done {
-		q.done = true
-		delete(r.pending, q.id)
+// attempt отправляет одну датаграмму; ожидание ответа выполняет селектор.
+func (r *Resolver) attempt(q *Query, now time.Time) error {
+	q.attempts++
+	q.deadline = now.Add(queryTimeout)
+	err := syscall.Sendto(r.fd, q.packet, 0, &r.server)
+	//0 - флаги отправки
+	// Временная невозможность отправки тоже расходует попытку
+	if err == syscall.EAGAIN || err == syscall.EINTR || err == syscall.ENOBUFS {
+		return nil
 	}
+	return err
+}
+
+// Cancel отменяет запрос, колбэк не будет вызван
+func (r *Resolver) Cancel(q *Query) {
+	if q == nil || q.timer == nil || r.pending[q.id] != q {
+		return
+	}
+	r.queue.Remove(q.timer)
+	delete(r.pending, q.id)
+	q.timer = nil
+	q.cb = nil
+	q.packet = nil
 }
 
 // HandleReadable читает одну датаграмму и завершает соответствующий запрос.
@@ -148,46 +173,45 @@ func (r *Resolver) HandleReadable() {
 	question := m.Questions[0]
 	if !strings.EqualFold(question.Name.String(), q.name) ||
 		question.Type != dnsmessage.TypeA || question.Class != dnsmessage.ClassINET {
-		return
+		return //наш ли это вопрос
 	}
 	ip, err := responseIP(&m)
-	r.complete(q, ip, err)
+	r.complete(q, ip, err) //вызов callback
 }
 
-// Expire завершает ошибкой запросы с истёкшим дедлайном.
+// Expire повторяет запрос по таймеру; после третьей попытки сообщает тайм-аут.
 func (r *Resolver) Expire(now time.Time) {
-	for len(r.queue) > 0 {
-		q := r.queue[0]
-		if !q.done && now.Before(q.deadline) {
+	for front := r.queue.Front(); front != nil; front = r.queue.Front() {
+		q := front.Value.(*Query)
+		if now.Before(q.deadline) {
 			return
 		}
-		r.queue[0] = nil
-		r.queue = r.queue[1:]
-		if !q.done {
+		if q.attempts >= maxAttempts {
 			r.complete(q, [4]byte{}, ErrTimeout)
+		} else if err := r.attempt(q, now); err != nil {
+			r.complete(q, [4]byte{}, err)
+		} else {
+			r.queue.MoveToBack(front)
 		}
 	}
 }
 
 // NextDeadline возвращает ближайший дедлайн, если есть ожидающие запросы.
 func (r *Resolver) NextDeadline() (time.Time, bool) {
-	for len(r.queue) > 0 && r.queue[0].done {
-		r.queue[0] = nil
-		r.queue = r.queue[1:]
-	}
-	if len(r.queue) == 0 {
+	front := r.queue.Front()
+	if front == nil {
 		return time.Time{}, false
 	}
-	return r.queue[0].deadline, true
+	return front.Value.(*Query).deadline, true
 }
 
 func (r *Resolver) complete(q *Query, ip [4]byte, err error) {
-	q.done = true
-	delete(r.pending, q.id)
-	q.cb(ip, err)
+	cb := q.cb
+	r.Cancel(q)
+	cb(ip, err)
 }
 
-// buildQuery формирует A-запрос с помощью библиотеки.
+// buildQuery формирует A-запрос с помощью библиотеки
 func buildQuery(id uint16, name string) ([]byte, error) {
 	name = strings.TrimSuffix(name, ".")
 	if name == "" || len(name) > 253 {
@@ -208,6 +232,7 @@ func buildQuery(id uint16, name string) ([]byte, error) {
 	return packet, nil
 }
 
+// извлечение адреса
 func parseResponse(packet []byte) (uint16, [4]byte, error) {
 	var m dnsmessage.Message
 	if err := m.Unpack(packet); err != nil {
@@ -228,10 +253,36 @@ func responseIP(m *dnsmessage.Message) ([4]byte, error) {
 	default:
 		return [4]byte{}, ErrServFail
 	}
+	if len(m.Questions) != 1 {
+		return [4]byte{}, ErrFormat
+	}
+	name := strings.ToLower(m.Questions[0].Name.String())
+	addresses := make(map[string][4]byte)
+	aliases := make(map[string]string)
 	for _, answer := range m.Answers {
-		if a, ok := answer.Body.(*dnsmessage.AResource); ok && answer.Header.Class == dnsmessage.ClassINET {
-			return a.A, nil
+		if answer.Header.Class != dnsmessage.ClassINET {
+			continue
+		}
+		owner := strings.ToLower(answer.Header.Name.String())
+		switch body := answer.Body.(type) {
+		case *dnsmessage.AResource:
+			if _, exists := addresses[owner]; !exists {
+				addresses[owner] = body.A
+			}
+		case *dnsmessage.CNAMEResource:
+			aliases[owner] = strings.ToLower(body.CNAME.String())
 		}
 	}
-	return [4]byte{}, ErrNotFound
+	// Длина цепочки ограничена числом CNAME в ответе, в том числе при цикле.
+	for i := 0; i <= len(aliases); i++ {
+		next, ok := aliases[name]
+		if !ok {
+			if ip, found := addresses[name]; found {
+				return ip, nil
+			}
+			return [4]byte{}, ErrNotFound
+		}
+		name = next
+	}
+	return [4]byte{}, ErrFormat
 }
